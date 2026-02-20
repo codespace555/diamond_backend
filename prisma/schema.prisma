@@ -1,0 +1,377 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==================== ENUMS ====================
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  AGENT
+  USER
+}
+
+enum LedgerType {
+  CREDIT
+  DEBIT
+  TRANSFER_IN
+  TRANSFER_OUT
+  BET_PLACE
+  BET_SETTLE
+  BET_REFUND
+  ORDER_PLACE
+  ORDER_CANCEL
+  ORDER_SETTLE
+  EXPOSURE_LOCK
+  EXPOSURE_RELEASE
+}
+
+enum MatchStatus {
+  UPCOMING
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum MarketStatus {
+  OPEN // Accepting orders
+  SUSPENDED // Temporarily halted
+  CLOSED // No more orders; awaiting settlement
+  SETTLED // Settlement done
+}
+
+enum BetType {
+  BACK
+  LAY
+}
+
+enum BetStatus {
+  PENDING
+  WON
+  LOST
+  REFUNDED
+}
+
+enum OrderSide {
+  BACK
+  LAY
+}
+
+enum OrderStatus {
+  OPEN // Unmatched
+  PARTIAL // Partially matched
+  MATCHED // Fully matched
+  CANCELLED // Cancelled by user or system
+}
+
+enum TransactionType {
+  BET
+  WIN
+  LOSS
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+// ==================== MODELS ====================
+
+model User {
+  id       String   @id @default(uuid())
+  email    String   @unique
+  password String
+  name     String
+  role     UserRole
+  parentId String?
+  isBanned Boolean  @default(false)
+  parent   User?    @relation("UserHierarchy", fields: [parentId], references: [id])
+  children User[]   @relation("UserHierarchy")
+
+  wallet             Wallet?
+  ledgerEntries      Ledger[]
+  bets               Bet[]
+  orders             Order[]
+  casinoTransactions CasinoTransaction[]
+  marketExposures    MarketExposure[]
+  notifications      Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([parentId])
+  @@index([role])
+  @@index([isBanned])
+}
+
+model Wallet {
+  id       String  @id @default(uuid())
+  userId   String  @unique
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance  Decimal @default(0) @db.Decimal(15, 2)
+  exposure Decimal @default(0) @db.Decimal(15, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Ledger {
+  id      String     @id @default(uuid())
+  userId  String
+  user    User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount  Decimal    @db.Decimal(15, 2)
+  type    LedgerType
+  balance Decimal    @db.Decimal(15, 2)
+  notes   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([type])
+}
+
+model Match {
+  id        String      @id @default(uuid())
+  teamA     String
+  teamB     String
+  sport     String
+  status    MatchStatus @default(UPCOMING)
+  startTime DateTime
+  endTime   DateTime?
+
+  // External ID used by The Odds API for score lookups
+  externalId String? @unique
+
+  markets Market[]
+  bets    Bet[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([startTime])
+  @@index([externalId])
+}
+
+model Market {
+  id      String       @id @default(uuid())
+  matchId String
+  match   Match        @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  name    String
+  status  MarketStatus @default(OPEN)
+
+  runners Runner[]
+
+  winnerId String?
+  winner   Runner? @relation("WinnerRunner", fields: [winnerId], references: [id])
+
+  orders          Order[]
+  referenceOdds   ReferenceOdds[]
+  marketExposures MarketExposure[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([matchId])
+  @@index([status])
+}
+
+model Runner {
+  id       String   @id @default(uuid())
+  marketId String
+  market   Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  name     String
+  backOdds Decimal  @db.Decimal(10, 2)
+  layOdds  Decimal  @db.Decimal(10, 2)
+  isWinner Boolean?
+
+  orders Order[]
+  bets   Bet[]
+  trades Trade[]
+
+  referenceOdds ReferenceOdds[]
+
+  wonMarkets Market[] @relation("WinnerRunner")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([marketId])
+}
+
+model Bet {
+  id       String @id @default(uuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  matchId  String
+  match    Match  @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  runnerId String
+  runner   Runner @relation(fields: [runnerId], references: [id], onDelete: Cascade)
+
+  type      BetType
+  odds      Decimal   @db.Decimal(10, 2)
+  stake     Decimal   @db.Decimal(15, 2)
+  liability Decimal   @db.Decimal(15, 2)
+  status    BetStatus @default(PENDING)
+  payout    Decimal?  @db.Decimal(15, 2)
+
+  createdAt DateTime  @default(now())
+  settledAt DateTime?
+
+  @@index([userId])
+  @@index([matchId])
+  @@index([status])
+}
+
+// ──────────────────────────────────────────────
+// EXCHANGE MODELS
+// ──────────────────────────────────────────────
+
+/// An order placed on the exchange order book.
+model Order {
+  id          String @id @default(uuid())
+  userId      String
+  user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  marketId    String
+  market      Market @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  selectionId String
+  selection   Runner @relation(fields: [selectionId], references: [id], onDelete: Cascade)
+
+  side           OrderSide
+  price          Decimal     @db.Decimal(10, 2)
+  stake          Decimal     @db.Decimal(15, 2)
+  matchedStake   Decimal     @default(0) @db.Decimal(15, 2)
+  remainingStake Decimal     @db.Decimal(15, 2)
+  status         OrderStatus @default(OPEN)
+
+  // Tracks locked exposure for this specific order
+  lockedExposure Decimal @default(0) @db.Decimal(15, 2)
+
+  // Trades created from this order
+  backTrades Trade[] @relation("BackOrderTrades")
+  layTrades  Trade[] @relation("LayOrderTrades")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([marketId])
+  @@index([selectionId])
+  @@index([status])
+  @@index([side, price, createdAt])
+}
+
+/// A matched trade between a back order and a lay order.
+model Trade {
+  id          String  @id @default(uuid())
+  backOrderId String
+  backOrder   Order   @relation("BackOrderTrades", fields: [backOrderId], references: [id])
+  layOrderId  String
+  layOrder    Order   @relation("LayOrderTrades", fields: [layOrderId], references: [id])
+  selectionId String
+  selection   Runner  @relation(fields: [selectionId], references: [id])
+  price       Decimal @db.Decimal(10, 2)
+  stake       Decimal @db.Decimal(15, 2)
+
+  // Settlement tracking
+  settled   Boolean   @default(false)
+  settledAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([backOrderId])
+  @@index([layOrderId])
+  @@index([selectionId])
+  @@index([settled])
+}
+
+/// Per-user, per-market exposure tracking (aggregate).
+model MarketExposure {
+  id             String  @id @default(uuid())
+  userId         String
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  marketId       String
+  market         Market  @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  exposureAmount Decimal @default(0) @db.Decimal(15, 2)
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, marketId])
+  @@index([userId])
+  @@index([marketId])
+}
+
+/// Reference odds polled from The Odds API (read-only; not used for matching).
+model ReferenceOdds {
+  id                 String   @id @default(uuid())
+  marketId           String
+  market             Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  selectionId        String
+  selection          Runner   @relation(fields: [selectionId], references: [id], onDelete: Cascade)
+  referenceBackPrice Decimal  @db.Decimal(10, 2)
+  referenceLayPrice  Decimal  @db.Decimal(10, 2)
+  lastUpdated        DateTime @default(now())
+
+  @@unique([marketId, selectionId])
+  @@index([marketId])
+  @@index([selectionId])
+}
+
+// ──────────────────────────────────────────────
+// CASINO MODELS (unchanged)
+// ──────────────────────────────────────────────
+
+model Game {
+  id        String  @id @default(uuid())
+  name      String
+  slug      String  @unique
+  category  String
+  thumbnail String?
+  launchUrl String
+
+  transactions CasinoTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+model CasinoTransaction {
+  id            String          @id @default(uuid())
+  userId        String
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gameId        String
+  game          Game            @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  type          TransactionType
+  amount        Decimal         @db.Decimal(15, 2)
+  balanceBefore Decimal         @db.Decimal(15, 2)
+  balanceAfter  Decimal         @db.Decimal(15, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([gameId])
+}
+
+model Notification {
+  id      String           @id @default(uuid())
+  userId  String
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title   String
+  message String
+  type    NotificationType @default(INFO)
+  read    Boolean          @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+  @@index([createdAt])
+}
